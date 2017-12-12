@@ -217,8 +217,15 @@ class SegaRetro:
     def __init__(self, config):
         self.config = config.scrappers["segaretro"]
 
-    def openBarcode(self, driver, store):
-        loadPage(driver, "https://segaretro.org/index.php?title={}".format(store.release.barcode))
+    def lookup(self, driver, lookup_value):
+        loadPage(driver, "https://segaretro.org/index.php?title={}".format(lookup_value))
+        try:
+            driver.find_element_by_css_selector("div.noarticletext")
+            return None
+        except NoSuchElementException:
+            return driver.current_url
+
+    def scrapCurrentPage(self, driver, store):
         store.concept.name = driver.find_element_by_css_selector("#p-cactions > h2").text
         store.concept.urls.append(driver.current_url)
         store.release.date = Date(self.readDate(driver))
@@ -335,10 +342,67 @@ class Collecster:
         return insideOutmostQuotes(success_text)
 
 
+def recordGame(driver, handles, args, file_iterator, barcode=None, lookup=None):
+    store = Store()
+    if barcode:
+        store.release.barcode = barcode
+        lookup = barcode
+
+    driver.switch_to_window(handles["segaretro"])
+    segaRetro = SegaRetro(config)
+    if (not lookup) or (not segaRetro.lookup(driver, lookup)):
+        return False
+    segaRetro.scrapCurrentPage(driver, store)
+
+    if not args.skip_wikipedia:
+        driver.switch_to_window(handles["wikipedia"])
+        wikipedia = Wikipedia()
+        wikipedia.openName(driver, store)
+        try:
+            wikipedia.scrapValues(driver, store)
+        except Exception as e:
+            command = input("Scrapping failed from Wikipedia window."
+                            " Try navigation manually to the right page then press enter, or type 'w' to skip...")
+            if (command != "w"):
+                wikipedia.scrapValues(driver, store)
+    else:
+        store.concept.developer = input("Please enter developer: ")
+        store.release.publisher = input("Please enter publisher: ")
+
+    print(store)
+
+    driver.switch_to_window(handles["collecster"])
+
+    if (not args.concept) and (not args.release):
+        collecster.prefillConcept(driver, store.concept)
+        store.concept.saved_name = collecster.waitSuccessConfirmation(driver)
+    else:
+        store.concept.saved_name = args.concept
+    print("Saved concept name: {}".format(store.concept.saved_name))
+
+    if not args.release:
+        collecster.prefillRelease(driver, store)
+        store.release.saved_name = collecster.waitSuccessConfirmation(driver)
+    else:
+        store.release.saved_name = args.release
+    print("Saved release name: {}".format(store.release.saved_name))
+
+    collecster.prefillOccurrence(driver, store, file_iterator)
+    collecster.waitSuccessConfirmation(driver)
+
+    return True
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Adhoc templating for Collecster")
     parser.add_argument("picturefolder", help="A folder containing the pictures to be added to Occurrences.")
-    parser.add_argument("barcode", type=int, help="The game barcode.")
+
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--barcode", type=int, help="The game barcode.")
+    group.add_argument('--name', help="The game name.")
+    group.add_argument('--interactive', action="store_true",
+                       help="Launch in interactive mode, where the application ask for barcodes in a loop.")
+
     parser.add_argument("--credentials-file", default="credentials.json", 
                         help="A JSON file with 'username' and 'password' keys")
     parser.add_argument("--concept", help="If a concept name is given, no concept will be created.")
@@ -351,67 +415,42 @@ if __name__ == "__main__":
     # Create Chrome driver
     driver = webdriver.Chrome()
 
-    config = TemplateConfig()
-
     windowCount = 3
     if (args.skip_wikipedia):
         windowCount -= 1
 
+    for i in range(windowCount-1):
+        openWindow(driver)
+    handles = {
+        "collecster": driver.window_handles[0],
+        "segaretro": driver.window_handles[1],
+        "wikipedia": driver.window_handles[2],
+    } 
+
+    config = TemplateConfig()
+
+    file_iterator = iter(listFiles(args.picturefolder, "jpg"))
+
     try:
-        fileIterator = iter(listFiles(args.picturefolder, "jpg"))
-
-        for i in range(windowCount-1):
-            openWindow(driver)
-
-        handles = driver.window_handles
-
         collecster = Collecster(config)
         collecster.login(driver, args.credentials_file)
 
-        driver.switch_to_window(handles[1])
-        store = Store()
-        store.release.barcode = args.barcode
+        if args.barcode:
+            recordGame(driver, handles, args.barcode, args)
+            input("Success! Press any key to exit...")
 
-        segaRetro = SegaRetro(config)
-        segaRetro.openBarcode(driver, store)
+        elif args.interactive:
+            while(True):
+                barcode = input("Please enter barcode (Ctrl+C to stop): ")
+                name = None
+                if not barcode:
+                    name = input("Please enter name (Ctrl+C to stop): ")
+                success = recordGame(driver, handles, args, file_iterator, barcode, name)
+                if not success:
+                    print("Could not find a game for provided parameters")
 
-        if not args.skip_wikipedia:
-            driver.switch_to_window(handles[2])
-            wikipedia = Wikipedia()
-            wikipedia.openName(driver, store)
-            try:
-                wikipedia.scrapValues(driver, store)
-            except Exception as e:
-                command = input("Scrapping failed from Wikipedia window."
-                                " Try navigation manually to the right page then press enter, or type 'w' to skip...")
-                if (command != "w"):
-                    wikipedia.scrapValues(driver, store)
         else:
-            store.concept.developer = input("Please enter developer: ")
-            store.release.publisher = input("Please enter publisher: ")
-
-        print(store)
-
-        driver.switch_to_window(handles[0])
-
-        if (not args.concept) and (not args.release):
-            collecster.prefillConcept(driver, store.concept)
-            store.concept.saved_name = collecster.waitSuccessConfirmation(driver)
-        else:
-            store.concept.saved_name = args.concept
-        print("Saved concept name: {}".format(store.concept.saved_name))
-
-        if not args.release:
-            collecster.prefillRelease(driver, store)
-            store.release.saved_name = collecster.waitSuccessConfirmation(driver)
-        else:
-            store.release.saved_name = args.release
-        print("Saved release name: {}".format(store.release.saved_name))
-
-        collecster.prefillOccurrence(driver, store, fileIterator)
-        collecster.waitSuccessConfirmation(driver)
-
-        input("Success! Press any key to exit...")
+            raise Exception("Unimplemented mode")
 
     except Exception as e:
         input("Error: {}".format(e))
