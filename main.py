@@ -15,6 +15,7 @@ import argparse
 import glob
 import json
 import os.path
+import time
 
 
 def loadPage(driver, url, parametersDict=None):
@@ -52,6 +53,16 @@ def openWindow(driver, url="_blank"):
     driver.execute_script("window.open('', '{}', 'toolbar=1,location=0,menubar=1');".format(url))
 
 
+def insideOutmostQuotes(text):
+    result = text[text.index('"')+1:]
+    result = result[:result.rfind('"')]
+    return result
+
+
+def listFiles(folder, extension):
+    return [os.path.abspath(path) for path in glob.glob(os.path.join(folder, "*.{}".format(extension)))]
+
+
 class TemplateConfig:
     def __init__(self):
         self.concept = {}
@@ -78,6 +89,11 @@ class TemplateConfig:
                 {"pictures-{index}-detail": "Side label", "pictures-{index}-any_attribute": "[packaging]cartridge box"},
         ] 
 
+        self.scrappers = {
+            "segaretro": {
+                "date-system-title": "Sega Master System",
+            }
+        }
 
 class Concept:
     def __init__(self):
@@ -97,6 +113,7 @@ class Store:
         for key, value in self.__dict__.items():
             lines.append("{}: {}".format(key, value.__dict__))
         return "\n".join(lines)
+
 
 class Date:
     def __init__(self, value):
@@ -123,11 +140,19 @@ class Webpage:
     def __init__(self, driver):
         self.driver = driver
         
-    def fieldNameToId(self, name):
+    def _fieldNameToId(self, name):
        return "id_{}".format(name.lower().replace(" ", "_")) 
 
+    def _checkValue(self, field_name, value):
+        # The value could be an int, cast anyway
+        splitted = str(value).split("\n")
+        if len(splitted) > 1:
+            print(colored("Field {} receives multiple values {}. First one, '{}', will be used"
+                                .format(field_name, ", ".join(splitted), splitted[0]), "yellow"))
+        return splitted[0]
+
     def findField(self, field_name):
-        return self.driver.find_element_by_id(self.fieldNameToId(field_name))
+        return self.driver.find_element_by_id(self._fieldNameToId(field_name))
 
     def fillText(self, element, value):
         element.send_keys(value)
@@ -136,11 +161,11 @@ class Webpage:
         Select(element).select_by_visible_text(value)
 
     def setText(self, field_name, value):
-        self.fillText(self.findField(field_name), value)
+        self.fillText(self.findField(field_name), self._checkValue(field_name, value))
 
     def setSelect(self, field_name, value):
         try:
-            self.fillSelect(self.findField(field_name), value)
+            self.fillSelect(self.findField(field_name), self._checkValue(field_name, value))
         except NoSuchElementException:
             print(colored("Unable to fill {}, please complete it manually".format(field_name), "yellow"))
             return False
@@ -184,8 +209,11 @@ class Webpage:
 class SegaRetro:
     # The nested table is not always inside the same tr index
     # Hopefully, it will always be the only nested table
-    date_selector = "#mw-content-text > div:nth-child(2) > table > tbody tr > td > table > tbody"
+    #date_selector = "#mw-content-text > div:nth-child(2) > table > tbody tr > td > table > tbody"
+    date_selector = "#mw-content-text > div > table.breakout > tbody tr > td > table > tbody"
     
+    def __init__(self, config):
+        self.config = config.scrappers["segaretro"]
 
     def openBarcode(self, driver, store):
         loadPage(driver, "https://segaretro.org/index.php?title={}".format(store.release.barcode))
@@ -193,10 +221,17 @@ class SegaRetro:
         store.concept.urls.append(driver.current_url)
         store.release.date = Date(self.readDate(driver))
         return store
-        
+
     def readDate(self, driver):
-        dateRow = driver.find_element_by_css_selector(self.date_selector).find_element_by_xpath("tr/td[text() = ' FR ']/..")
-        return dateRow.find_element_by_css_selector("span[itemprop=datePublished]").text
+        dateRow = driver.find_element_by_css_selector(self.date_selector) \
+                    .find_element_by_xpath("tr/td[text() = ' FR ']/div/a[@title='{}']/../../.."
+                        .format(self.config["date-system-title"]))
+        value = dateRow.find_element_by_css_selector("span[itemprop=datePublished]").text
+        # Dates on Sega Retro can be followed by a number between square brackets. We get rid of this suffix.
+        if "[" in value:
+            return value[:value.index("[")]
+        else:
+            return value
 
 
 class Wikipedia:
@@ -218,10 +253,6 @@ class Wikipedia:
         store.release.publisher = scrapValue(driver, self.publisherSelector, "Publisher(s)")
     
 
-def listFiles(folder, extension):
-    return [os.path.abspath(path) for path in glob.glob(os.path.join(folder, "*.{}".format(extension)))]
-
-
 class Collecster:
     domain = "http://collecster.adnn.fr/admin/advideogame/"
     homeTitle = "Advideogame administration | Django site admin"
@@ -242,6 +273,7 @@ class Collecster:
             "table": "#pictures-group > div > fieldset > table > tbody"
         }
     }
+    success_selector = "#container > ul.messagelist > li.success"
 
     def __init__(self, config):
         self.config = config
@@ -256,27 +288,28 @@ class Collecster:
 
     def prefillRelease(self, driver, store):
         addRelease = loadPage(driver, self.domain+"release/add/")
-        addRelease.requireSelect("Concept", store.concept.name)
+        addRelease.requireSelect("Concept", store.concept.saved_name)
+        time.sleep(1) # Naive wait for AJAX
         store.release.date.fill(addRelease)
         addRelease.setText("Barcode", store.release.barcode)
         addRelease.setSelect("Release regions", self.config.release["release_region"])
         addRelease.setSelect("System specification", self.config.release["system_specification"])
         addRelease.setInlines(self.release["attributes"], self.config.release["attributes"])
-        addRelease.setText("software-0-publisher", store.release.publisher)
+        addRelease.setSelect("software-0-publisher", store.release.publisher)
 
     def prefillOccurrence(self, driver, store, file_iterator):
         addOccurrence = loadPage(driver, self.domain+"occurrence/add/")
-        addOccurrence.requireSelect("Release", store.concept.name)
-        addOccurrence.requireSelect("Origin", self.config.occurrence["origin"])
-        input("Press enter to insert pictures...")
+        addOccurrence.requireSelect("Release", store.release.saved_name)
+        time.sleep(1) # Naive wait for AJAX
+        addOccurrence.setSelect("Origin", self.config.occurrence["origin"])
+        addOccurrence.setSelect("operationalocc-0-working_condition", self.config.occurrence["working_condition"])
 
+        input("Press enter to insert pictures...")
         addOccurrence.extendInlines(self.occurrence["pictures"]["table"], len(self.config.occurrence["pictures"]))
         for index, picture_guide in enumerate(self.config.occurrence["pictures"]):
             addOccurrence.setText("pictures-{index}-image_file".format(index=index), file_iterator.__next__())
             for field, value in picture_guide.items():
                 addOccurrence.setSelect(field.format(index=index), value)
-
-        addOccurrence.setSelect("operationalocc-0-working_condition", self.config.occurrence["working_condition"])
 
     def login(self, driver, login_filepath):
         login = loadPage(driver, self.domain)
@@ -286,33 +319,44 @@ class Collecster:
             login.submit("login-form")
         waitForTitle(driver, self.homeTitle)
 
+    def waitSuccessConfirmation(self, driver):
+        WebDriverWait(driver, 360000).until(EC.text_to_be_present_in_element(
+            (By.CSS_SELECTOR, self.success_selector), "was added successfully"))
+        success_text = driver.find_element_by_css_selector(self.success_selector).text
+        return insideOutmostQuotes(success_text)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Adhoc templating for Collecster")
-    parser.add_argument("barcode", type=int, help="The game barcode.")
     parser.add_argument("picturefolder", help="A folder containing the pictures to be added to Occurrences.")
+    parser.add_argument("barcode", type=int, help="The game barcode.")
     parser.add_argument("--credentials-file", default="credentials.json", 
                         help="A JSON file with 'username' and 'password' keys")
+    parser.add_argument("--concept", help="If a concept name is given, no concept will be created.")
+    parser.add_argument("--release", help="If a release name is given, no concept nor release will be created.")
     args = parser.parse_args()
 
     # Create Chrome driver
     driver = webdriver.Chrome()
 
+    config = TemplateConfig()
+
     try:
+        fileIterator = iter(listFiles(args.picturefolder, "jpg"))
+
         openWindow(driver)
         openWindow(driver)
         handles = driver.window_handles
 
-        collecster = Collecster(TemplateConfig())
+        collecster = Collecster(config)
         collecster.login(driver, args.credentials_file)
 
         driver.switch_to_window(handles[1])
         store = Store()
         store.release.barcode = args.barcode
 
-        segaRetro = SegaRetro()
+        segaRetro = SegaRetro(config)
         segaRetro.openBarcode(driver, store)
-
 
         driver.switch_to_window(handles[2])
         wikipedia = Wikipedia()
@@ -321,11 +365,27 @@ if __name__ == "__main__":
         print(store)
 
         driver.switch_to_window(handles[0])
-        collecster.prefillConcept(driver, store.concept)
 
-        input("Press any key to exit...")
+        if (not args.concept) and (not args.release):
+            collecster.prefillConcept(driver, store.concept)
+            store.concept.saved_name = collecster.waitSuccessConfirmation(driver)
+        else:
+            store.concept.saved_name = args.concept
+        print("Saved concept name: {}".format(store.concept.saved_name))
 
-    except e:
+        if not args.release:
+            collecster.prefillRelease(driver, store)
+            store.release.saved_name = collecster.waitSuccessConfirmation(driver)
+        else:
+            store.release.saved_name = args.release
+        print("Saved release name: {}".format(store.release.saved_name))
+
+        collecster.prefillOccurrence(driver, store, fileIterator)
+        collecster.waitSuccessConfirmation(driver)
+
+        input("Success! Press any key to exit...")
+
+    except Exception as e:
         input("Error: {}".format(e))
 
     finally:
