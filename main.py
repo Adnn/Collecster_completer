@@ -98,10 +98,12 @@ class TemplateConfig:
 class Concept:
     def __init__(self):
         self.urls = []
+        self.developer = None
     pass
 
 class Release:
-    pass
+    def __init__(self):
+        self.publisher = None
 
 class Store:
     def __init__(self):
@@ -248,10 +250,17 @@ class Wikipedia:
                     "btnI": "I",
                  })
 
-        store.concept.urls.insert(0, driver.current_url)
-        store.concept.developer = scrapValue(driver, self.devSelector, "Developer(s)")
-        store.release.publisher = scrapValue(driver, self.publisherSelector, "Publisher(s)")
-    
+    def scrapValues(self, driver, store):
+        # Note: simulate atomic operation by first attempting all operation that could reasonably fail, before
+        # commiting to the store variable
+        url = driver.current_url
+        developer = scrapValue(driver, self.devSelector, "Developer(s)")
+        publisher = scrapValue(driver, self.publisherSelector, "Publisher(s)")
+
+        store.concept.urls.insert(0, url)
+        store.concept.developer = developer
+        store.release.publisher = publisher
+
 
 class Collecster:
     domain = "http://collecster.adnn.fr/admin/advideogame/"
@@ -334,6 +343,9 @@ if __name__ == "__main__":
                         help="A JSON file with 'username' and 'password' keys")
     parser.add_argument("--concept", help="If a concept name is given, no concept will be created.")
     parser.add_argument("--release", help="If a release name is given, no concept nor release will be created.")
+
+    parser.add_argument("-w", "--skip-wikipedia", action="store_true", help="Prevents the Wikipedia scrapper.")
+
     args = parser.parse_args()
 
     # Create Chrome driver
@@ -341,11 +353,16 @@ if __name__ == "__main__":
 
     config = TemplateConfig()
 
+    windowCount = 3
+    if (args.skip_wikipedia):
+        windowCount -= 1
+
     try:
         fileIterator = iter(listFiles(args.picturefolder, "jpg"))
 
-        openWindow(driver)
-        openWindow(driver)
+        for i in range(windowCount-1):
+            openWindow(driver)
+
         handles = driver.window_handles
 
         collecster = Collecster(config)
@@ -358,9 +375,20 @@ if __name__ == "__main__":
         segaRetro = SegaRetro(config)
         segaRetro.openBarcode(driver, store)
 
-        driver.switch_to_window(handles[2])
-        wikipedia = Wikipedia()
-        wikipedia.openName(driver, store)
+        if not args.skip_wikipedia:
+            driver.switch_to_window(handles[2])
+            wikipedia = Wikipedia()
+            wikipedia.openName(driver, store)
+            try:
+                wikipedia.scrapValues(driver, store)
+            except Exception as e:
+                command = input("Scrapping failed from Wikipedia window."
+                                " Try navigation manually to the right page then press enter, or type 'w' to skip...")
+                if (command != "w"):
+                    wikipedia.scrapValues(driver, store)
+        else:
+            store.concept.developer = input("Please enter developer: ")
+            store.release.publisher = input("Please enter publisher: ")
 
         print(store)
 
