@@ -37,6 +37,7 @@ def scrapValue(driver, selector, expectedLabel):
     return labelElement.find_element_by_xpath("../..") \
                        .find_element_by_css_selector("td").text
 
+
 #def waitForElement(driver, selector):
 def waitForTitle(driver, title):
     # give a good 100h to login
@@ -92,8 +93,12 @@ class TemplateConfig:
         self.scrappers = {
             "segaretro": {
                 "date-system-title": "Sega Master System",
+            },
+            "giantbomb": {
+                "system-abbreviation": "SMS",
             }
         }
+
 
 class Concept:
     def __init__(self):
@@ -260,13 +265,40 @@ class Wikipedia:
     def scrapValues(self, driver, store):
         # Note: simulate atomic operation by first attempting all operation that could reasonably fail, before
         # commiting to the store variable
-        url = driver.current_url
         developer = scrapValue(driver, self.devSelector, "Developer(s)")
         publisher = scrapValue(driver, self.publisherSelector, "Publisher(s)")
+        url = driver.current_url
 
         store.concept.urls.insert(0, url)
         store.concept.developer = developer
         store.release.publisher = publisher
+
+
+class GiantBomb:
+    origin = "https://www.giantbomb.com"
+    search_query = "/search/?indices[0]=game&page=1&q=spy%20vs%20spy"
+
+    def __init__(self, config):
+        self.config = config.scrappers["giantbomb"]
+
+    def openName(self, driver, store):
+        loadPage(driver, self.origin + "/search",
+                 {
+                    "indices[0]": "game",
+                    "q": store.concept.name,
+                 })
+
+        xpath = "//span[@class=\"search-platform\"][contains(text(), \"{platform}\")]"
+        driver.find_element_by_xpath(xpath.format(platform=self.config["system-abbreviation"])) \
+                .click()
+
+    def scrapValues(self, driver, store):
+        # Just a check that will throw is the found page is not what was expected
+        driver.find_element_by_xpath(
+                "//*[@id=\"default-content\"]/aside/div[@class=\"wiki-details\"]/h3[text()='Game details']")
+        url = driver.current_url
+
+        store.concept.urls.append(url)
 
 
 class Collecster:
@@ -342,7 +374,19 @@ class Collecster:
         return insideOutmostQuotes(success_text)
 
 
-def recordGame(driver, handles, args, file_iterator, barcode=None, lookup=None):
+def retryScrap(driver, website, website_name, store):
+    scrap_on = True
+    while scrap_on:
+        try:
+            website.scrapValues(driver, store)
+            scrap_on = False #No exception thrown means scraping was successful
+        except Exception as e:
+            command = input("Scrapping failed from {} window.".format(website_name) +
+                            " Try navigation manually to the right page then press enter, or type 's' to skip...")
+            scrap_on = (command != "s")
+
+
+def recordGame(driver, handles, config, args, file_iterator, barcode=None, lookup=None):
     store = Store()
     if barcode:
         store.release.barcode = barcode
@@ -358,18 +402,19 @@ def recordGame(driver, handles, args, file_iterator, barcode=None, lookup=None):
         driver.switch_to_window(handles["wikipedia"])
         wikipedia = Wikipedia()
         wikipedia.openName(driver, store)
-        try:
-            wikipedia.scrapValues(driver, store)
-        except Exception as e:
-            command = input("Scrapping failed from Wikipedia window."
-                            " Try navigation manually to the right page then press enter, or type 'w' to skip...")
-            if (command != "w"):
-                wikipedia.scrapValues(driver, store)
+        retryScrap(driver, wikipedia, "Wikipedia", store)
     else:
         store.concept.developer = input("Please enter developer: ")
         store.release.publisher = input("Please enter publisher: ")
 
-    print(store)
+    if args.verbose:
+        print(store)
+
+
+    driver.switch_to_window(handles["giantbomb"])
+    giantbomb = GiantBomb(config)
+    giantbomb.openName(driver, store)
+    retryScrap(driver, giantbomb, "GiantBomb", store)
 
     driver.switch_to_window(handles["collecster"])
 
@@ -408,14 +453,17 @@ if __name__ == "__main__":
     parser.add_argument("--concept", help="If a concept name is given, no concept will be created.")
     parser.add_argument("--release", help="If a release name is given, no concept nor release will be created.")
 
-    parser.add_argument("-w", "--skip-wikipedia", action="store_true", help="Prevents the Wikipedia scrapper.")
+    parser.add_argument("-s", "--skip-wikipedia", action="store_true", help="Prevents the Wikipedia scrapper.")
+
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Prints the store content as it was scrapped from the sources.")
 
     args = parser.parse_args()
 
     # Create Chrome driver
     driver = webdriver.Chrome()
 
-    windowCount = 3
+    windowCount = 4
     if (args.skip_wikipedia):
         windowCount -= 1
 
@@ -423,8 +471,9 @@ if __name__ == "__main__":
         openWindow(driver)
     handles = {
         "collecster": driver.window_handles[0],
-        "segaretro": driver.window_handles[1],
-        "wikipedia": driver.window_handles[2],
+        "segaretro":  driver.window_handles[1],
+        "wikipedia":  driver.window_handles[2],
+        "giantbomb":  driver.window_handles[3],
     } 
 
     config = TemplateConfig()
@@ -436,7 +485,7 @@ if __name__ == "__main__":
         collecster.login(driver, args.credentials_file)
 
         if args.barcode:
-            recordGame(driver, handles, args.barcode, args)
+            recordGame(driver, handles, config, args, file_iterator, args.barcode)
             input("Success! Press any key to exit...")
 
         elif args.interactive:
@@ -445,7 +494,7 @@ if __name__ == "__main__":
                 name = None
                 if not barcode:
                     name = input("Please enter name (Ctrl+C to stop): ")
-                success = recordGame(driver, handles, args, file_iterator, barcode, name)
+                success = recordGame(driver, handles, config, args, file_iterator, barcode, name)
                 if not success:
                     print("Could not find a game for provided parameters")
 
