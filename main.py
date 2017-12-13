@@ -109,6 +109,7 @@ class Concept:
 class Release:
     def __init__(self):
         self.publisher = None
+        self.barcode = None
 
 class Store:
     def __init__(self):
@@ -154,8 +155,8 @@ class Webpage:
         # The value could be an int, cast anyway
         splitted = str(value).split("\n")
         if len(splitted) > 1:
-            print(colored("Field {} receives multiple values {}. First one, '{}', will be used"
-                                .format(field_name, ", ".join(splitted), splitted[0]), "yellow"))
+            print(colored("Field {} receives multiple values. First one, '{}', will be used. The complete list:\n\t*{}"
+                                .format(field_name, splitted[0], "\n\t*".join(splitted)), "yellow"))
         return splitted[0]
 
     def findField(self, field_name):
@@ -250,9 +251,9 @@ class SegaRetro:
 
 class Wikipedia:
     devSelector = "#mw-content-text > div > table.infobox.hproduct > tbody" \
-                  " > tr:nth-child(3) > th > a"
+                  " > tr > th > a[title=\"Video game developer\"]"
     publisherSelector = "#mw-content-text > div > table.infobox.hproduct > tbody" \
-                        " > tr:nth-child(4) > th > a"
+                        " > tr > th > a[title=\"Video game publisher\"]"
 
     def openName(self, driver, store):
         loadPage(driver,
@@ -484,8 +485,8 @@ if __name__ == "__main__":
         collecster = Collecster(config)
         collecster.login(driver, args.credentials_file)
 
-        if args.barcode:
-            recordGame(driver, handles, config, args, file_iterator, args.barcode)
+        if args.barcode or args.name:
+            recordGame(driver, handles, config, args, file_iterator, args.barcode, args.name)
             input("Success! Press any key to exit...")
 
         elif args.interactive:
