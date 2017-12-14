@@ -486,8 +486,10 @@ if __name__ == "__main__":
         collecster.login(driver, args.credentials_file)
 
         if args.barcode or args.name:
-            recordGame(driver, handles, config, args, file_iterator, args.barcode, args.name)
-            input("Success! Press any key to exit...")
+            if recordGame(driver, handles, config, args, file_iterator, args.barcode, args.name):
+                input("Success! Press any key to exit...")
+            else:
+                input("Failed. Press any key to exit...")
 
         elif args.interactive:
             while(True):
